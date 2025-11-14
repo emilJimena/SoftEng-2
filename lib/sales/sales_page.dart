@@ -65,47 +65,60 @@ class _SalesContentState extends State<SalesContent> {
     setState(() => isLoading = false);
   }
 
-Future<void> _fetchAndMapOrders() async {
-  await SalesData().loadOrders();
+  Future<void> _fetchAndMapOrders() async {
+    await SalesData().loadOrders();
+    final allOrders = <Map<String, dynamic>>[];
 
-  final today = DateTime.now();
-  final filteredOrders = <Map<String, dynamic>>[];
+    for (var order in SalesData().orders) {
+      final items =
+          (order['items'] as List<dynamic>?)?.map((item) {
+            return {
+              'menuItem': item['menu_item'] ?? '',
+              'category': item['category'] ?? '',
+              'quantity': item['quantity']?.toString() ?? '1',
+              'size': item['size'] ?? '',
+              'price': item['price']?.toString() ?? '0.00',
+              'addons': (item['addons'] as List<dynamic>?) ?? [],
+            };
+          }).toList() ??
+          [];
 
-  for (var order in SalesData().orders) {
-    // Filter out invalid items
-    final items = (order['items'] as List<dynamic>?)
-            ?.where((item) => (item['quantity'] ?? 0) > 0)
-            .map((item) {
-      return {
-        'menuItem': item['menuItem'] ?? item['menu_item'] ?? '',
-        'category': item['category'] ?? '',
-        'quantity': item['quantity']?.toString() ?? '1',
-        'size': item['size'] ?? '',
-        'price': item['price']?.toString() ?? '0.00',
-        'addons': (item['addons'] as List<dynamic>?) ?? [],
-      };
-    }).toList() ??
-        [];
+      allOrders.add({
+        'orderName': order['order_name'] ?? 'Order',
+        'orderDate': order['order_date'] ?? '--',
+        'orderTime': order['order_time'] ?? '--',
+        'purchaseMethod':
+            order['payment_method'] ?? order['paymentMethod'] ?? 'Cash',
+        'voucher': order['voucher'] ?? '',
+        'amountPaid':
+            double.tryParse(
+              (order['amount_paid'] ?? order['amountPaid'] ?? '0').toString(),
+            ) ??
+            0.0,
+        'change':
+            double.tryParse(
+              (order['change_amount'] ?? order['change'] ?? '0').toString(),
+            ) ??
+            0.0,
+        'handledBy': order['handled_by'] ?? order['cashier'] ?? 'Unknown',
+        'items': items,
+      });
+    }
 
-    if (items.isEmpty) continue; // skip empty orders
-
-    filteredOrders.add({
-      'orderName': order['orderName'] ?? order['order_name'] ?? 'Order',
-      'orderDate': order['orderDate'] ?? order['order_date'] ?? '--',
-      'orderTime': order['orderTime'] ?? order['order_time'] ?? '--',
-      'purchaseMethod': order['paymentMethod'] ?? order['payment_method'] ?? 'Cash',
-      'voucher': order['voucher'] ?? '',
-      'amountPaid': double.tryParse((order['amountPaid'] ?? order['amount_paid'] ?? '0').toString()) ?? 0.0,
-      'change': double.tryParse((order['change'] ?? order['change_amount'] ?? '0').toString()) ?? 0.0,
-      'handledBy': order['handledBy'] ?? order['cashier'] ?? 'Unknown',
-      'items': items,
+    allOrders.sort((a, b) {
+      try {
+        final dateA = DateFormat('MMM dd, yyyy').parse(a['orderDate']);
+        final dateB = DateFormat('MMM dd, yyyy').parse(b['orderDate']);
+        return dateB.compareTo(dateA);
+      } catch (_) {
+        return 0;
+      }
     });
-  }
 
-  // Only keep today's orders in SalesData().orders
-  SalesData().orders
-    ..clear()
-    ..addAll(filteredOrders.where((order) {
+    _allOrders = allOrders;
+
+    final today = DateTime.now();
+    final todayOrders = allOrders.where((order) {
       try {
         final orderDate = DateFormat('MMM dd, yyyy').parse(order['orderDate']);
         return orderDate.year == today.year &&
@@ -114,12 +127,12 @@ Future<void> _fetchAndMapOrders() async {
       } catch (_) {
         return false;
       }
-    }));
+    }).toList();
 
-  // Update the _allOrders for display
-  _allOrders = filteredOrders;
-}
-
+    SalesData().orders
+      ..clear()
+      ..addAll(todayOrders);
+  }
 
   Future<void> _pickDate(BuildContext context, bool isStart) async {
     final DateTime? picked = await showDatePicker(

@@ -227,6 +227,7 @@ class _CartPopupPageState extends State<CartPopupPage> {
             'menu_id': menuId,
             'quantity': quantity,
             'selected_addon_ids': addonIds,
+            'user_id': widget.userId, // pass user ID for log
           }),
         );
 
@@ -234,24 +235,6 @@ class _CartPopupPageState extends State<CartPopupPage> {
         if (deductInventoryData['success'] != true) {
           throw Exception(
             deductInventoryData['message'] ?? 'Failed to deduct inventory',
-          );
-        }
-
-        // Deduct inventory log
-        final deductLogResp = await http.post(
-          Uri.parse('$apiBase/inventory/deduct_inventory_log.php'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'menu_id': menuId,
-            'quantity': quantity,
-            'user_id': widget.userId,
-          }),
-        );
-
-        final deductLogData = jsonDecode(deductLogResp.body);
-        if (deductLogData['success'] != true) {
-          throw Exception(
-            deductLogData['message'] ?? 'Failed to deduct inventory log',
           );
         }
       }

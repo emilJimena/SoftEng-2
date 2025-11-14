@@ -27,119 +27,126 @@ class SalesData {
   }
 
   /// Add new order and send to backend
-Future<void> addOrder(
-  List<Map<String, dynamic>> cartItems, {
-  required String paymentMethod,
-  String? voucher,
-  required double amountPaid,
-  required double change,
-}) async {
-  // Filter out invalid or zero-quantity items
-  final validCartItems = cartItems
-      .where((item) => (item['quantity'] ?? 0) > 0)
-      .toList();
+  Future<void> addOrder(
+    List<Map<String, dynamic>> cartItems, {
+    required String paymentMethod,
+    String? voucher,
+    required double amountPaid, // new
+    required double change, // new
+  }) async {
+    if (cartItems.isEmpty) return;
+    if (saveApiUrl.isEmpty) await _setApiUrls();
 
-  if (validCartItems.isEmpty) return;
+    final now = DateTime.now();
+    final todayStr = '${_monthName(now.month)} ${now.day}, ${now.year}';
 
-  if (saveApiUrl.isEmpty) await _setApiUrls();
+    // Count existing orders for today
+    final todayOrdersCount = orders
+        .where((o) => o['orderDate'] == todayStr)
+        .length;
 
-  final now = DateTime.now();
-  final todayStr = '${_monthName(now.month)} ${now.day}, ${now.year}';
-
-  // Only count today's orders for naming
-  final todayOrdersCount = orders
-      .where((o) => o['orderDate'] == todayStr)
-      .length;
-
-  // Build new order using only valid items
-  final newOrder = {
-    'orderName': 'Order ${todayOrdersCount + 1}',
-    'orderDate': todayStr,
-    'orderTime':
-        '${now.hour > 12 ? now.hour - 12 : now.hour}:${now.minute.toString().padLeft(2, '0')} ${now.hour >= 12 ? "PM" : "AM"}',
-    'paymentMethod': paymentMethod,
-    'voucher': voucher ?? '',
-    'amountPaid': amountPaid,
-    'change': change,
-    'items': validCartItems.map((item) {
-      final price = (item['price'] ?? 0) * (item['quantity'] ?? 1);
-      return {
-        'menuItem': item['name'] ?? '',
-        'category': item['category'] ?? '',
-        'quantity': item['quantity'].toString(),
-        'size': item['size'] ?? '',
-        'price': price.toStringAsFixed(2),
-        'addons': List<String>.from(item['addons'] ?? []),
-      };
-    }).toList(),
-  };
-
-  // Remove any empty or invalid orders from local storage first
-  orders.removeWhere((order) {
-    final items = order['items'] as List<dynamic>? ?? [];
-    return items.isEmpty || items.every((i) => (i['quantity'] ?? 0) == 0);
-  });
-
-  // Add current order
-  orders.add(newOrder);
-  await _saveSales();
-
-  // --- Backend sending (optional) ---
-  try {
-    final jsonBody = {
-      "paymentMethod": paymentMethod,
-      "voucher": voucher ?? '',
-      "total": validCartItems.fold<double>(
-        0,
-        (sum, item) => sum + ((item['price'] ?? 0.0) * (item['quantity'] ?? 1)),
-      ),
-      "amountPaid": amountPaid,
-      "change": change,
+    final newOrder = {
+      'orderName': 'Order ${todayOrdersCount + 1}',
+      'orderDate': todayStr,
+      'orderTime':
+          '${now.hour > 12 ? now.hour - 12 : now.hour}:${now.minute.toString().padLeft(2, '0')} ${now.hour >= 12 ? "PM" : "AM"}',
+      'paymentMethod': paymentMethod,
+      'voucher': voucher ?? '',
+      'amountPaid': amountPaid,
+      'change': change,
+      'items': cartItems.map((item) {
+        final price = (item['price'] ?? 0) * (item['quantity'] ?? 1);
+        return {
+          'menuItem': item['name'] ?? '',
+          'category': item['category'] ?? '',
+          'quantity': item['quantity'].toString(),
+          'size': item['size'] ?? '',
+          'price': price.toStringAsFixed(2),
+          'addons': List<String>.from(item['addons'] ?? []),
+        };
+      }).toList(),
     };
 
-    final createOrderResponse = await http.post(
-      Uri.parse("${await ApiConfig.getBaseUrl()}/salesdata/create_order.php"),
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode(jsonBody),
-    );
+    orders.add(newOrder);
+    await _saveSales();
 
-    if (createOrderResponse.statusCode == 200) {
-      final res = jsonDecode(createOrderResponse.body);
-      if (res['success'] == true) {
-        final orderId = res['order_id'];
+    try {
+      // STEP 1: Create the order first
+      // Step 1: Build the JSON object first
+      final jsonBody = {
+        "paymentMethod": paymentMethod,
+        "voucher": voucher ?? '',
+        "total": cartItems.fold<double>(
+          0,
+          (sum, item) =>
+              sum + ((item['price'] ?? 0.0) * (item['quantity'] ?? 1)),
+        ),
+        "amountPaid": amountPaid, // make sure it’s never null
+        "change": change, // make sure it’s never null
+      };
 
-        // Send only valid cart items
-        await http.post(
-          Uri.parse(saveApiUrl),
-          headers: {"Content-Type": "application/json"},
-          body: jsonEncode({
-            "orderId": orderId,
-            "items": validCartItems.map((item) {
-              return {
-                "menuItem": item['name'] ?? '',
-                "category": item['category'] ?? '',
-                "quantity": item['quantity'] ?? 1,
-                "size": item['size'] ?? '',
-                "price": item['price'] ?? 0.0,
-                "addons": List<String>.from(item['addons'] ?? []),
-                "voucher": voucher ?? '',
-                "total": (item['price'] ?? 0.0) * (item['quantity'] ?? 1),
-              };
-            }).toList(),
-            "total": validCartItems.fold<double>(
-              0,
-              (sum, item) => sum + ((item['price'] ?? 0.0) * (item['quantity'] ?? 1)),
-            ),
-          }),
-        );
+      // Optional: debug print to see what you are sending
+      print("DEBUG JSON: $jsonBody");
+
+      // Step 2: Send it via HTTP
+      final createOrderResponse = await http.post(
+        Uri.parse("${await ApiConfig.getBaseUrl()}/salesdata/create_order.php"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode(jsonBody),
+      );
+      if (createOrderResponse.statusCode == 200) {
+        final res = jsonDecode(createOrderResponse.body);
+
+        if (res['success'] == true) {
+          print("✅ Order header created!");
+          final orderId = res['order_id'];
+
+          // STEP 2: Send the order items
+          final saveItemsResponse = await http.post(
+            Uri.parse(saveApiUrl),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "orderId": orderId,
+              "items": cartItems.map((item) {
+                return {
+                  "menuItem": item['name'] ?? '',
+                  "category": item['category'] ?? '',
+                  "quantity": item['quantity'] ?? 1,
+                  "size": item['size'] ?? '',
+                  "price": item['price'] ?? 0.0,
+                  "addons": List<String>.from(item['addons'] ?? []),
+                  "voucher": voucher ?? '',
+                  "total": (item['price'] ?? 0.0) * (item['quantity'] ?? 1),
+                };
+              }).toList(),
+              "total": cartItems.fold<double>(
+                0,
+                (sum, item) =>
+                    sum + ((item['price'] ?? 0.0) * (item['quantity'] ?? 1)),
+              ),
+            }),
+          );
+
+          if (saveItemsResponse.statusCode == 200) {
+            final itemRes = jsonDecode(saveItemsResponse.body);
+            if (itemRes['success'] == true) {
+              print("✅ Order items saved successfully!");
+            } else {
+              print("❌ Item save error: ${itemRes['message']}");
+            }
+          } else {
+            print("❌ HTTP error on item save: ${saveItemsResponse.statusCode}");
+          }
+        } else {
+          print("❌ Order creation failed: ${res['message']}");
+        }
+      } else {
+        print("❌ HTTP error: ${createOrderResponse.statusCode}");
       }
+    } catch (e) {
+      print("⚠️ Error sending order: $e");
     }
-  } catch (e) {
-    print("⚠️ Error sending order: $e");
-  }
-}
-
- // ✅ <--- this closing brace was missing
+  } // ✅ <--- this closing brace was missing
 
   /// Fetch orders from PHP and overwrite local orders
   Future<void> loadOrders() async {

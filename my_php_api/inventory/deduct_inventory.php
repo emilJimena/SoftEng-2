@@ -7,22 +7,23 @@ header("Access-Control-Allow-Headers: Content-Type");
 include("../db.php");
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
-$input = json_decode(file_get_contents('php://input'), true);
+$data = json_decode(file_get_contents('php://input'), true);
 
-$menu_id = intval($input['menu_id'] ?? 0);
-$quantity = floatval($input['quantity'] ?? 1);
-$selected_addons = $input['selected_addon_ids'] ?? [];
+$menu_id = intval($data['menu_id'] ?? 0);
+$quantity = floatval($data['quantity'] ?? 1);
+$selected_addons = $data['selected_addon_ids'] ?? [];
+$user_id = intval($data['user_id'] ?? 0);
 
-if ($menu_id <= 0) {
-    echo json_encode(['success' => false, 'message' => 'Menu ID is required']);
+if ($menu_id <= 0 || $quantity <= 0) {
+    echo json_encode(['success' => false, 'message' => 'Invalid menu ID or quantity']);
     exit;
 }
 
 try {
-    $deductions = [];
     $conn->begin_transaction();
+    $deductions = [];
 
-    // --- 1. Main menu ingredients ---
+    // --- 1. Gather main menu ingredients ---
     $stmt = $conn->prepare("SELECT material_id, quantity FROM menu_ingredients WHERE menu_id = ?");
     $stmt->bind_param("i", $menu_id);
     $stmt->execute();
@@ -30,23 +31,11 @@ try {
     while ($row = $result->fetch_assoc()) {
         $material_id = intval($row['material_id']);
         $qty_needed = floatval($row['quantity']) * $quantity;
-
-        // --- Check current stock ---
-        $stock_stmt = $conn->prepare("SELECT quantity FROM raw_materials WHERE id = ?");
-        $stock_stmt->bind_param("i", $material_id);
-        $stock_stmt->execute();
-        $stock_res = $stock_stmt->get_result()->fetch_assoc();
-        $current_stock = floatval($stock_res['quantity'] ?? 0);
-
-        if ($current_stock < $qty_needed) {
-            throw new Exception("Not enough stock for material ID $material_id");
-        }
-
         $deductions[$material_id] = ($deductions[$material_id] ?? 0) + $qty_needed;
     }
 
-    // --- 2. Addon ingredients ---
-    if (!empty($selected_addons) && is_array($selected_addons)) {
+    // --- 2. Gather addon ingredients ---
+    if (!empty($selected_addons)) {
         $placeholders = implode(',', array_fill(0, count($selected_addons), '?'));
         $types = str_repeat('i', count($selected_addons) + 1);
         $query = "SELECT material_id, quantity FROM menu_addons WHERE menu_id = ? AND addon_id IN ($placeholders)";
@@ -54,9 +43,7 @@ try {
 
         $params = array_merge([$menu_id], $selected_addons);
         $refs = [];
-        foreach ($params as $key => $value) {
-            $refs[$key] = &$params[$key];
-        }
+        foreach ($params as $k => $v) $refs[$k] = &$params[$k];
         array_unshift($refs, $types);
         call_user_func_array([$stmt, 'bind_param'], $refs);
 
@@ -65,30 +52,79 @@ try {
         while ($row = $result->fetch_assoc()) {
             $material_id = intval($row['material_id']);
             $qty_needed = floatval($row['quantity']) * $quantity;
-
-            $stock_stmt = $conn->prepare("SELECT quantity FROM raw_materials WHERE id = ?");
-            $stock_stmt->bind_param("i", $material_id);
-            $stock_stmt->execute();
-            $stock_res = $stock_stmt->get_result()->fetch_assoc();
-            $current_stock = floatval($stock_res['quantity'] ?? 0);
-
-            if ($current_stock < $qty_needed) {
-                throw new Exception("Not enough stock for addon material ID $material_id");
-            }
-
             $deductions[$material_id] = ($deductions[$material_id] ?? 0) + $qty_needed;
         }
     }
 
-    // --- 3. Deduct all ingredients ---
+    // --- 3. Deduct from raw_materials ---
     foreach ($deductions as $material_id => $qty) {
-        $update = $conn->prepare("UPDATE raw_materials SET quantity = quantity - ? WHERE id = ?");
-        $update->bind_param("di", $qty, $material_id);
-        $update->execute();
+        $stmt = $conn->prepare("UPDATE raw_materials SET quantity = quantity - ? WHERE id = ? AND quantity >= ?");
+        $stmt->bind_param("did", $qty, $material_id, $qty);
+        $stmt->execute();
+
+        if ($stmt->affected_rows === 0) {
+            throw new Exception("Not enough stock in raw_materials for material ID $material_id");
+        }
+        $stmt->close();
+    }
+
+    // --- 4. Deduct from inventory_log FIFO and create OUT entries ---
+    foreach ($deductions as $material_id => $qty_to_deduct) {
+        while ($qty_to_deduct > 0) {
+            $stmt = $conn->prepare("
+                SELECT id, quantity, unit, expiration_date 
+                FROM inventory_log 
+                WHERE material_id = ? AND quantity > 0 
+                ORDER BY expiration_date ASC, id ASC
+                LIMIT 1
+            ");
+            $stmt->bind_param("i", $material_id);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            $log_entry = $res->fetch_assoc();
+            $stmt->close();
+
+            if (!$log_entry) {
+                throw new Exception("Not enough stock for material ID $material_id in inventory_log");
+            }
+
+            $deduct_qty = min($qty_to_deduct, $log_entry['quantity']);
+
+            // a) Reduce existing log entry
+            $stmt = $conn->prepare("UPDATE inventory_log SET quantity = quantity - ? WHERE id = ?");
+            $stmt->bind_param("di", $deduct_qty, $log_entry['id']);
+            $stmt->execute();
+            $stmt->close();
+
+            // b) Create OUT entry
+            $stmt = $conn->prepare("
+                INSERT INTO inventory_log (material_id, quantity, unit, expiration_date, reason, user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ");
+            $negative_qty = -$deduct_qty;
+            $reason = "Auto Deduction from Customer Order";
+            $stmt->bind_param(
+                "idsssi",
+                $material_id,
+                $negative_qty,
+                $log_entry['unit'],
+                $log_entry['expiration_date'],
+                $reason,
+                $user_id
+            );
+            $stmt->execute();
+            $stmt->close();
+
+            $qty_to_deduct -= $deduct_qty;
+        }
     }
 
     $conn->commit();
-    echo json_encode(['success' => true, 'deductions' => $deductions]);
+    echo json_encode([
+        'success' => true,
+        'message' => 'Inventory deducted (raw_materials + inventory_log) and OUT logs created',
+        'deductions' => $deductions
+    ]);
 
 } catch (Exception $e) {
     $conn->rollback();
