@@ -285,113 +285,135 @@ class _MaterialDetailsPageState extends State<MaterialDetailsPage> {
   }
 
   Future<void> _printPdf() async {
-    final pdf = pw.Document();
+  final pdf = pw.Document();
 
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        build: (pw.Context context) {
-          return [
-            pw.Text(
-              'Material Stock Log: ${widget.materialName}',
-              style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.SizedBox(height: 16),
-            pw.Text(() {
+  // Load DejaVuSans font (supports peso sign ₱)
+  final ttf = pw.Font.ttf(
+    await rootBundle.load("assets/fonts/DejaVuSans.ttf"),
+  );
+
+  // Apply font to PDF theme
+  final pdfTheme = pw.ThemeData.withFont(
+    base: ttf,
+    bold: ttf,
+  );
+
+  pdf.addPage(
+    pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      theme: pdfTheme,
+      build: (pw.Context context) {
+        return [
+          pw.Text(
+            'Material Stock Log: ${widget.materialName}',
+            style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 16),
+          pw.Text(
+            () {
               if (startDate != null && endDate != null) {
-                // Same day
                 if (DateFormat('yyyyMMdd').format(startDate!) ==
                     DateFormat('yyyyMMdd').format(endDate!)) {
                   return "Date: ${DateFormat('MMM d, yyyy').format(startDate!)}";
                 } else {
-                  // Different start and end dates
                   return "Date Range: ${DateFormat('MMM d, yyyy').format(startDate!)} - ${DateFormat('MMM d, yyyy').format(endDate!)}";
                 }
               } else if (startDate != null) {
-                // Only start date
                 return "Date: ${DateFormat('MMM d, yyyy').format(startDate!)}";
               } else if (endDate != null) {
-                // Only end date
                 return "Date: ${DateFormat('MMM d, yyyy').format(endDate!)}";
               } else {
-                // No date filter
                 return "Date: All";
               }
-            }(), style: const pw.TextStyle(fontSize: 14)),
+            }(),
+            style: const pw.TextStyle(fontSize: 14),
+          ),
+          pw.SizedBox(height: 16),
+          // Grouped logs by date
+          ...groupedLogs.entries.map((entry) {
+            final date = entry.key;
+            final logsForDate = entry.value;
 
-            pw.SizedBox(height: 16),
-            // Grouped logs by date
-            ...groupedLogs.entries.map((entry) {
-              final date = entry.key;
-              final logsForDate = entry.value;
-
-              return pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Container(
-                    color: PdfColor(
-                      1.0,
-                      0.647,
-                      0.0,
-                      0.2,
-                    ), // RGBA where R,G,B are 0-1
-                    padding: const pw.EdgeInsets.all(6),
-                    child: pw.Text(
-                      date,
-                      style: pw.TextStyle(
-                        fontSize: 14,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Container(
+                  color: PdfColor(1.0, 0.647, 0.0, 0.2),
+                  padding: const pw.EdgeInsets.all(6),
+                  child: pw.Text(
+                    date,
+                    style: pw.TextStyle(
+                      fontSize: 14,
+                      fontWeight: pw.FontWeight.bold,
                     ),
                   ),
+                ),
+                pw.SizedBox(height: 6),
+                pw.Table.fromTextArray(
+                  headers: [
+                    'Qty',
+                    'Unit',
+                    'Movement',
+                    'Reason',
+                    'Cost/unit',
+                    'Total Cost',
+                    'Expiration',
+                    'Logged By',
+                  ],
+                  data: logsForDate.map((log) {
+                    final isOut = log['movement_type'] == 'OUT';
+                    final expiration =
+                        (log['expiration_date'] != null &&
+                                log['expiration_date'] != 'N/A' &&
+                                log['expiration_date'] != 'NONE')
+                            ? DateFormat('MM/dd/yyyy')
+                                .format(DateTime.parse(log['expiration_date']))
+                            : '';
 
-                  pw.SizedBox(height: 6),
-                  pw.Table.fromTextArray(
-                    headers: [
-                      'Qty',
-                      'Unit',
-                      'Movement',
-                      'Reason',
-                      'Cost/unit',
-                      'Total Cost',
-                      'Expiration',
-                      'Logged By',
-                    ],
-                    data: logsForDate.map((log) {
-                      final isOut = log['movement_type'] == 'OUT';
-                      final expiration =
-                          (log['expiration_date'] != null &&
-                              log['expiration_date'] != 'N/A' &&
-                              log['expiration_date'] != 'NONE')
-                          ? DateFormat(
-                              'MM/dd/yyyy',
-                            ).format(DateTime.parse(log['expiration_date']))
-                          : '';
-                      return [
-                        log['quantity'].toString(),
-                        log['unit'] ?? '',
-                        log['movement_type'] ?? '',
-                        isOut ? log['reason'] ?? '' : '',
-                        log['cost']?.toString() ?? '',
-                        log['total_cost']?.toString() ?? '',
-                        expiration,
-                        log['user'] ?? '',
-                      ];
-                    }).toList(),
+                    return [
+                      log['quantity'].toString(),
+                      log['unit'] ?? '',
+                      log['movement_type'] ?? '',
+                      isOut ? log['reason'] ?? '' : '',
+                      log['cost'] != null ? '₱${log['cost']}' : '',
+                      log['total_cost'] != null ? '₱${log['total_cost']}' : '',
+                      expiration,
+                      log['user'] ?? '',
+                    ];
+                  }).toList(),
+                  headerStyle: pw.TextStyle(
+                    fontWeight: pw.FontWeight.bold,
+                    fontSize: 11,
                   ),
-                  pw.SizedBox(height: 12),
-                ],
-              );
-            }).toList(),
-          ];
-        },
-      ),
-    );
+                  cellStyle: const pw.TextStyle(fontSize: 10),
+                  cellPadding:
+                      const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  columnWidths: {
+                    0: const pw.FlexColumnWidth(0.8), // Qty
+                    1: const pw.FlexColumnWidth(1.2), // Unit
+                    2: const pw.FlexColumnWidth(1.4), // Movement
+                    3: const pw.FlexColumnWidth(2.8), // Reason
+                    4: const pw.FlexColumnWidth(1.2), // Cost/unit
+                    5: const pw.FlexColumnWidth(1.2), // Total Cost
+                    6: const pw.FlexColumnWidth(1.6), // Expiration
+                    7: const pw.FlexColumnWidth(1.8), // Logged By
+                  },
+                  border: pw.TableBorder.all(width: 0.7),
+                ),
+                pw.SizedBox(height: 12),
+              ],
+            );
+          }).toList(),
+        ];
+      },
+    ),
+  );
 
-    await Printing.layoutPdf(
-      onLayout: (PdfPageFormat format) async => pdf.save(),
-    );
-  }
+  await Printing.layoutPdf(
+    onLayout: (PdfPageFormat format) async => pdf.save(),
+  );
+}
+
 
   @override
   Widget build(BuildContext context) {
